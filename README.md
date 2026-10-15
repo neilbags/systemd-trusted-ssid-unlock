@@ -149,3 +149,7 @@ Read this before you use it.
   slower. If no trusted AP is around, the hook gives up after `HOOK_TRIES`.
 - Tested with swaylock, NetworkManager and Intel `iwlwifi`. Other drivers
   should work as long as `iw scan` works while NetworkManager is asleep.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
