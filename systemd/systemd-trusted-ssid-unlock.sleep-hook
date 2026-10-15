@@ -1,0 +1,6 @@
+#!/bin/sh
+# Quick scan for trusted APs on resume, before NetworkManager wakes.
+# See /usr/local/bin/systemd-trusted-ssid-unlock.
+case $1 in
+    post) /usr/local/bin/systemd-trusted-ssid-unlock hook ;;
+esac

@@ -1,0 +1,38 @@
+#!/bin/bash
+# Trust the currently connected Wi-Fi network for auto-unlock after resume.
+# Adds every visible AP (BSSID) broadcasting the current SSID, so all bands
+# and mesh nodes are covered. Run it again to pick up new APs.
+set -e
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+
+TRUSTED=/etc/systemd-trusted-ssid-unlock/trusted
+DEV=
+[[ -r /etc/systemd-trusted-ssid-unlock/config ]] && . /etc/systemd-trusted-ssid-unlock/config
+[[ -n $DEV ]] || DEV=$(iw dev | awk '$1 == "Interface" { print $2; exit }')
+
+ssid=$(iw dev "$DEV" link | sed -n 's/^\tSSID: //p')
+if [[ -z $ssid ]]; then
+	echo "$DEV is not connected to a Wi-Fi network" >&2
+	exit 1
+fi
+
+echo "Scanning for APs named '$ssid'..."
+# nmcli escapes ':' inside fields as '\:'
+entries=$(nmcli -t -f SSID,BSSID,FREQ dev wifi list ifname "$DEV" --rescan yes |
+	sed 's/\\:/\x01/g' |
+	awk -F: -v ssid="$ssid" '{ gsub("\001", ":", $1); gsub("\001", ":", $2) }
+		$1 == ssid { print tolower($2), $3 + 0, $1 }')
+
+if [[ -z $entries ]]; then
+	echo "No APs named '$ssid' found in scan" >&2
+	exit 1
+fi
+
+mkdir -p "${TRUSTED%/*}"
+touch "$TRUSTED"
+# Replace any existing entries for these BSSIDs, keep everything else.
+{ grep -vFf <(cut -d' ' -f1 <<<"$entries") "$TRUSTED" || true; echo "$entries"; } > "$TRUSTED.new"
+mv "$TRUSTED.new" "$TRUSTED"
+
+echo "Trusted:"
+echo "$entries" | sed 's/^/  /'

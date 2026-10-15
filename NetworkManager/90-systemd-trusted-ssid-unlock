@@ -1,0 +1,5 @@
+#!/bin/sh
+# Keep the stored channels of trusted APs up to date whenever Wi-Fi connects.
+[ "$2" = up ] && [ "$DEVICE_IFACE" = "$(iw dev | awk '$1 == "Interface" { print $2; exit }')" ] &&
+	/usr/local/bin/systemd-trusted-ssid-unlock refresh
+exit 0

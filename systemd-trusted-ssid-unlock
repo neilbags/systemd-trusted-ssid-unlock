@@ -1,0 +1,130 @@
+#!/bin/bash
+# Unlock the screen after resume if a trusted Wi-Fi AP (by BSSID) is in range.
+#
+#   systemd-trusted-ssid-unlock hook     run from the systemd-sleep hook, before NetworkManager
+#                        wakes and grabs the radio: quick scan of known channels
+#   systemd-trusted-ssid-unlock watch    run from systemd-trusted-ssid-unlock.service after resume: fallback
+#                        that watches scan results (incl. NetworkManager's scan)
+#   systemd-trusted-ssid-unlock refresh  update stored channels from the current scan results
+#
+# Trusted APs live in $TRUSTED, one per line: "<bssid> <freq MHz> <ssid>".
+# Add the network you're connected to with systemd-trusted-ssid-unlock-add.
+CONF_DIR=/etc/systemd-trusted-ssid-unlock
+TRUSTED=$CONF_DIR/trusted
+STATE=/run/systemd-trusted-ssid-unlock    # resume time (boottime) and whether we unlocked
+
+# Defaults, overridable in $CONF_DIR/config
+DEV=                                   # Wi-Fi interface; empty = autodetect
+UNLOCK_CMD='pkill -USR1 -x swaylock'   # how to unlock the screen
+HOOK_TRIES=20                          # quick scans before the session resumes
+WATCH_SECONDS=15                       # how long the fallback keeps looking
+[[ -r $CONF_DIR/config ]] && . "$CONF_DIR/config"
+
+log() { logger -t systemd-trusted-ssid-unlock -- "$mode: $*"; }
+
+uptime_s() { cut -d' ' -f1 /proc/uptime; }
+
+# Print "<bssid> <freq> <last seen, boottime seconds>" for each AP in an iw
+# scan. Errors go to $err.
+scan() {
+	iw dev "$DEV" scan "$@" 2> "$err" | awk '
+		/^BSS / { bss = tolower(substr($2, 1, 17)) }
+		/^\tfreq:/ { freq[bss] = int($2) }
+		/^\tlast seen: .*boottime/ { seen[bss] = $3 + 0 }
+		END { for (b in freq) print b, freq[b], seen[b] + 0 }'
+}
+
+# Keep APs seen since resume on the given channels (all if none), then keep
+# only trusted ones. iw also lists cached and pre-suspend BSSes, which must
+# never unlock.
+fresh_trusted() {
+	awk -v since="$resumed" -v f=" $* " '$3 >= since && (f == "  " || index(f, " " $2 " "))' |
+		awk 'NR == FNR { t[$1]; next } $1 in t' "$TRUSTED" -
+}
+
+unlock() {
+	log "trusted AP in range ($1), unlocking"
+	touch "$STATE/unlocked"
+	eval "$UNLOCK_CMD"
+}
+
+# Record new channels for trusted BSSIDs, given "<bssid> <freq> ..." on stdin.
+update_freqs() {
+	local seen changes
+	seen=$(cat)
+	[[ -n $seen ]] || return 0
+	exec 9>"$TRUSTED.lock"
+	flock 9
+	changes=$(mktemp)
+	awk -v seen="$seen" '
+		BEGIN { n = split(seen, l, "\n"); for (i = 1; i <= n; i++) { split(l[i], f, " "); fr[f[1]] = f[2] } }
+		($1 in fr) && fr[$1] != $2 {
+			printf "%s %s moved from %s to %s MHz\n", $3, $1, $2, fr[$1] > "/dev/stderr"
+			$2 = fr[$1]
+		}
+		{ print }' "$TRUSTED" 2> "$changes" > "$TRUSTED.new" &&
+		mv "$TRUSTED.new" "$TRUSTED"
+	while read -r line; do log "$line"; done < "$changes"
+	rm -f "$changes"
+}
+
+mode=$1
+[[ -s $TRUSTED ]] || exit 0
+[[ -n $DEV ]] || DEV=$(iw dev | awk '$1 == "Interface" { print $2; exit }')
+[[ -n $DEV ]] || { log "no Wi-Fi interface found"; exit 0; }
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+mkdir -p "$STATE"
+freqs=$(awk '{ print $2 }' "$TRUSTED" | sort -u)
+
+case $mode in
+hook)
+	resumed=$(uptime_s)
+	echo "$resumed" > "$STATE/resumed"
+	rm -f "$STATE/unlocked"
+	# The interface is usually down while NetworkManager sleeps; bring it up
+	# just for the scan and put it back how we found it.
+	was_down=
+	ip link show "$DEV" | grep -q '[<,]UP[,>]' || was_down=1
+	for i in $(seq "$HOOK_TRIES"); do
+		if [[ $was_down ]] && ! ip link set "$DEV" up 2> "$err"; then
+			log "try $i: link up failed: $(<"$err")"
+		else
+			hits=$(scan flush freq $freqs | fresh_trusted $freqs)
+			if [[ -n $hits ]]; then
+				unlock "${hits%% *}"
+				break
+			fi
+			log "try $i: nothing found $(tr '\n' ' ' < "$err")"
+		fi
+		sleep 0.1
+	done
+	[[ $was_down ]] && ip link set "$DEV" down
+	;;
+watch)
+	[[ -e $STATE/unlocked ]] && exit 0
+	resumed=$(cat "$STATE/resumed" 2>/dev/null || uptime_s)
+	# Watch the scan cache. NetworkManager's full scan fills it as it goes and
+	# also covers APs that changed channel. Try our own quick scan too, in
+	# case the radio is free.
+	for _ in $(seq $((WATCH_SECONDS * 5))); do
+		scan flush freq $freqs > /dev/null
+		hits=$(scan dump | fresh_trusted)
+		if [[ -n $hits ]]; then
+			unlock "${hits%% *}"
+			update_freqs <<< "$hits"
+			exit 0
+		fi
+		sleep 0.2
+	done
+	log "no trusted AP in range"
+	;;
+refresh)
+	resumed=0
+	scan dump | fresh_trusted | update_freqs
+	;;
+*)
+	echo "usage: $0 hook|watch|refresh" >&2
+	exit 1
+	;;
+esac

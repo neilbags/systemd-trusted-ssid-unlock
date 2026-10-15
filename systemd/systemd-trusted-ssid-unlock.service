@@ -1,0 +1,10 @@
+[Unit]
+Description=Fallback screen unlock on resume near a trusted Wi-Fi AP
+After=suspend.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/systemd-trusted-ssid-unlock watch
+
+[Install]
+WantedBy=suspend.target

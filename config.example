@@ -1,0 +1,13 @@
+# /etc/systemd-trusted-ssid-unlock/config — all settings are optional.
+
+# Wi-Fi interface. Empty = first interface reported by `iw dev`.
+#DEV=wlan0
+
+# Command that unlocks the screen. Runs as root.
+#UNLOCK_CMD='pkill -USR1 -x swaylock'
+
+# Quick scans tried right after resume (0.1s apart, before the session thaws).
+#HOOK_TRIES=20
+
+# How long the fallback service keeps looking after resume.
+#WATCH_SECONDS=15
